@@ -18,6 +18,7 @@ import (
 	"github.com/IDisposable/docker-wyze-bridge/internal/config"
 	"github.com/IDisposable/docker-wyze-bridge/internal/go2rtcmgr"
 	"github.com/IDisposable/docker-wyze-bridge/internal/issues"
+	"github.com/IDisposable/docker-wyze-bridge/internal/motion"
 	"github.com/IDisposable/docker-wyze-bridge/internal/mqtt"
 	"github.com/IDisposable/docker-wyze-bridge/internal/recording"
 	"github.com/IDisposable/docker-wyze-bridge/internal/snapshot"
@@ -251,6 +252,48 @@ func main() {
 	snapPruner := snapshot.NewPruner(cfg.SnapshotPath, cfg.SnapshotKeep, snapLog)
 
 	// Start all background goroutines. The WebUI listener is already running
+	motionDone := make(chan struct{})
+	if cfg.MotionAPI {
+		motionLog := log.With().Str("c", "motion").Logger()
+		poller := motion.New(apiClient, camMgr.Cameras, cfg, motionLog)
+		poller.OnMotion = func(cam *camera.Camera) {
+			if mqttClient != nil && mqttClient.IsConnected() {
+				mqttClient.PublishCameraMotion(cam)
+			}
+			webServer.SSE().SendJSON("camera_motion", cam.StatusJSON())
+		}
+		poller.OnCameraChange = func(oldCamera, newCamera *camera.Camera) {
+			if mqttClient == nil || !mqttClient.IsConnected() {
+				return
+			}
+			if newCamera != nil {
+				mqttClient.PublishCameraMotion(newCamera)
+				mqttClient.PublishMotionDiscovery(newCamera)
+			} else {
+				mqttClient.RemoveMotionDiscovery(oldCamera.GetInfo().MAC)
+			}
+		}
+		poller.OnStatus = func(err error) {
+			if mqttClient != nil {
+				mqttClient.PublishMotionAvailability(err == nil)
+			}
+			if err == nil {
+				issueReg.Resolve("motion/cloud")
+			} else if ctx.Err() == nil {
+				issueReg.Report(issues.Issue{
+					ID: "motion/cloud", Scope: "motion", Severity: issues.SeverityWarn,
+					Message: "Wyze cloud motion events are unavailable", Detail: err.Error(),
+				})
+			}
+		}
+		go func() {
+			defer close(motionDone)
+			poller.Run(ctx)
+		}()
+		motionLog.Info().Dur("interval", cfg.MotionInterval).Msg("cloud motion events enabled; Wyze recording settings and cooldowns apply")
+	} else {
+		close(motionDone)
+	}
 	go camMgr.RunDiscoveryLoop(ctx)
 	go snapMgr.Run(ctx)
 	go snapPruner.Run(ctx)
@@ -287,6 +330,7 @@ func main() {
 	// Wait for shutdown
 	<-ctx.Done()
 	log.Info().Msg("shutting down")
+	<-motionDone
 	recMgr.Shutdown()
 	shutdownBridge(webServer, mqttClient, gwellProxy, go2rtcMgr)
 
@@ -397,6 +441,7 @@ func setupMQTT(ctx context.Context, cfg *config.Config, camMgr *camera.Manager, 
 		Password:       cfg.MQTTPassword,
 		Topic:          cfg.MQTTTopic,
 		DiscoveryTopic: cfg.MQTTDiscoveryTopic,
+		MotionEnabled:  cfg.MotionAPI,
 	}
 	mqttLog := log.With().Str("c", "mqtt").Logger()
 	mqttClient := mqtt.NewClient(ctx, mqttCfg, camMgr, apiClient, cfg.BridgeIP, mqttLog)

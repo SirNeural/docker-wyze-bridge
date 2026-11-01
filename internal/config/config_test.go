@@ -2,7 +2,42 @@ package config
 
 import (
 	"testing"
+	"time"
 )
+
+func TestLoadMotionOptions_ValidatesInsteadOfFallingBack(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value string
+		valid            bool
+	}{
+		{"fractional seconds", "MOTION_INT", "1.5", true},
+		{"bad enable", "MOTION_API", "sometimes", false},
+		{"bad interval", "MOTION_INT", "fast", false},
+		{"zero interval", "MOTION_INT", "0", false},
+		{"subsecond interval", "MOTION_INT", "500ms", false},
+		{"infinite interval", "MOTION_INT", "Inf", false},
+		{"overflow", "MOTION_RESET", "1e100", false},
+		{"bad reset", "MOTION_RESET", "-10s", false},
+		{"short lookback", "MOTION_MAX_AGE", "1s", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("STATE_DIR", t.TempDir())
+			t.Setenv("MOTION_API", "True")
+			t.Setenv("MOTION_INT", "5s")
+			t.Setenv("MOTION_RESET", "10s")
+			t.Setenv("MOTION_MAX_AGE", "30s")
+			t.Setenv(tc.key, tc.value)
+			cfg, err := Load()
+			if tc.valid {
+				if err != nil || !cfg.MotionAPI || cfg.MotionInterval != 1500*time.Millisecond {
+					t.Fatalf("valid fractional configuration failed: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid motion configuration was silently accepted")
+			}
+		})
+	}
+}
 
 func TestLoadDefaults(t *testing.T) {
 	// Clear any env that might interfere (devcontainer sets STATE_DIR, LOG_LEVEL, etc.)

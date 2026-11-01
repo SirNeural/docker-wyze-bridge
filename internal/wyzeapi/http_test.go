@@ -97,7 +97,7 @@ func TestClient_PostJSON_TokenExpired(t *testing.T) {
 
 func TestClient_PostJSON_RateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-RateLimit-Limit", "5")
+		w.Header().Set("X-RateLimit-Remaining", "5")
 		w.Header().Set("X-RateLimit-Reset-By", "Mon Apr 14 12:00:00 UTC 2026")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": "1",

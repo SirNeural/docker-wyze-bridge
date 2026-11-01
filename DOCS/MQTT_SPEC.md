@@ -229,6 +229,7 @@ All entities use availability from `{topic}/{cam}/state` (connected/disconnected
 | `camera_info`, `stream_info` JSON | Implemented |
 | `thumbnail` binary | Implemented |
 | `recording` state | Implemented |
+| Cloud motion events (`motion`, `motion_ts`, HA binary sensor) | Implemented, opt-in `MOTION_API` |
 | HA discovery: camera, quality, audio, night_vision | Implemented |
 | `quality/set`, `audio/set`, `night_vision/set` | Implemented |
 | Snapshot trigger | Implemented |
@@ -247,3 +248,33 @@ All entities use availability from `{topic}/{cam}/state` (connected/disconnected
 | Alarm (`K10630/K10632`) parity | Deferred |
 | Pan-cam state + K110xx commands | Deferred |
 | Sensors requiring live readback (`res`, `wifi`) | Deferred |
+
+## Cloud motion delivery
+
+`MOTION_API=true` enables camera-native detections delivered through Wyze's
+cloud event API. It does not implement the deferred local camera alarm stream.
+`motion_detection` remains an enable/disable setting, not a detection event.
+
+| Topic | Retained payload |
+|---|---|
+| `{topic}/{cam}/motion` | `1` for detection; `2` for clear |
+| `{topic}/{cam}/motion_ts` | Last accepted event's Unix timestamp in seconds; `0` before any detection |
+| `{topic}/bridge/motion_state` | `online` after a successful poll; `offline` initially or on cloud failure |
+
+Motion is an inferred pulse: it clears after `MOTION_RESET` without a newer
+detection, even if the API is blocked, rate-limited, or unavailable. A clear
+preserves the last real timestamp. Restart clears retained pulses; reconnect
+republishes current state. Disabling the feature clears motion topics and
+removes its discovery entity. Camera removal clears the old pulse and removes
+motion discovery; renaming replaces the discovery state topic.
+
+The HA binary sensor uses `availability_mode=all` with bridge state and cloud
+motion state. Video stream state is deliberately not used. MQTT's bridge LWT
+still makes the sensor unavailable when the bridge disconnects.
+
+Camera REST status exposes `motion` (boolean) and `motion_ts` (Unix
+milliseconds, `0` initially); `camera_motion` SSE events announce changes.
+Event metadata is transient and event media is never downloaded. Broker
+persistence of retained MQTT messages is controlled by the broker, not here.
+
+See [setup, cloud cooldowns, and Scrypted](../MIGRATION.md#opt-in-cloud-motion-events-and-scrypted).

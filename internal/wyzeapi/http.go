@@ -2,6 +2,7 @@ package wyzeapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -77,12 +79,27 @@ func (e *WyzeAPIError) AccessTokenExpired() bool {
 
 // RateLimitError represents a Wyze API rate limit response.
 type RateLimitError struct {
-	Remaining int
-	ResetBy   string
+	Remaining  int
+	ResetBy    string
+	RetryAfter time.Duration
 }
 
 func (e *RateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("rate limited: %d remaining, retry after %s", e.Remaining, e.RetryAfter)
+	}
 	return fmt.Sprintf("rate limited: %d remaining, reset by %s", e.Remaining, e.ResetBy)
+}
+
+func rateLimitResponse(resp *http.Response, remaining int) *RateLimitError {
+	err := &RateLimitError{Remaining: remaining, ResetBy: resp.Header.Get("X-RateLimit-Reset-By")}
+	raw := resp.Header.Get("Retry-After")
+	if seconds, parseErr := strconv.ParseInt(raw, 10, 32); parseErr == nil && seconds > 0 {
+		err.RetryAfter = time.Duration(seconds) * time.Second
+	} else if until, parseErr := http.ParseTime(raw); parseErr == nil {
+		err.RetryAfter = max(0, time.Until(until))
+	}
+	return err
 }
 
 // postJSON sends a JSON POST request and validates the response.
@@ -123,7 +140,11 @@ func (c *Client) postJSON(url string, headers map[string]string, body map[string
 
 // postRaw sends a raw string body POST request and validates the response.
 func (c *Client) postRaw(url string, headers map[string]string, body string) (map[string]interface{}, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(body)))
+	return c.postRawContext(context.Background(), url, headers, body)
+}
+
+func (c *Client) postRawContext(ctx context.Context, url string, headers map[string]string, body string) (map[string]interface{}, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
@@ -152,14 +173,15 @@ func (c *Client) postRaw(url string, headers map[string]string, body string) (ma
 }
 
 func (c *Client) validateResponse(resp *http.Response) (map[string]interface{}, error) {
-	// Check rate limiting
-	if remaining := resp.Header.Get("X-RateLimit-Limit"); remaining != "" {
-		n, _ := strconv.Atoi(remaining)
-		if n > 0 && n <= 10 {
-			return nil, &RateLimitError{
-				Remaining: n,
-				ResetBy:   resp.Header.Get("X-RateLimit-Reset-By"),
-			}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, rateLimitResponse(resp, 0)
+	}
+	// Capacity is not the number of calls remaining.
+	remaining := resp.Header.Get("X-RateLimit-Remaining")
+	if remaining != "" {
+		n, parseErr := strconv.Atoi(remaining)
+		if parseErr == nil && n >= 0 && n <= 10 {
+			return nil, rateLimitResponse(resp, n)
 		}
 	}
 
@@ -168,14 +190,24 @@ func (c *Client) validateResponse(resp *http.Response) (map[string]interface{}, 
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	c.log.Trace().
+	trace := c.log.Trace().
 		Int("status", resp.StatusCode).
-		Str("path", resp.Request.URL.Path).
-		Str("body", string(bodyBytes)).
-		Msg("response")
+		Str("path", resp.Request.URL.Path)
+	eventList := strings.HasSuffix(resp.Request.URL.Path, "/v4/device/get_event_list")
+	if !eventList {
+		trace = trace.Str("body", string(bodyBytes))
+	}
+	trace.Msg("response")
 
 	var result map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+	if !json.Valid(bodyBytes) {
+		return nil, fmt.Errorf("json decode (status %d): invalid JSON", resp.StatusCode)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+	if eventList {
+		decoder.UseNumber() // Event IDs can exceed float64's integer precision.
+	}
+	if err := decoder.Decode(&result); err != nil {
 		return nil, fmt.Errorf("json decode (status %d): %w", resp.StatusCode, err)
 	}
 

@@ -78,7 +78,8 @@ type marsEnvelope struct {
 // Requires a valid Wyze cloud auth state (call EnsureAuth first).
 // Thread-safe; callers can invoke concurrently per-camera.
 func (c *Client) MarsRegisterGWUser(ctx context.Context, deviceID string) (accessID, accessToken string, err error) {
-	if c.auth == nil || c.auth.AccessToken == "" {
+	auth := c.Auth()
+	if auth == nil || auth.AccessToken == "" {
 		return "", "", fmt.Errorf("mars: no wyze auth — call EnsureAuth first")
 	}
 	if deviceID == "" {
@@ -95,19 +96,19 @@ func (c *Client) MarsRegisterGWUser(ctx context.Context, deviceID string) (acces
 	// HMAC doesn't care about order but verifiers testing against
 	// the Python reference will want matching bytes.
 	body, err := json.Marshal(struct {
-		Nonce       string `json:"nonce"`
-		TTLMinutes  int    `json:"ttl_minutes"`
-		UniqueID    string `json:"unique_id"`
+		Nonce      string `json:"nonce"`
+		TTLMinutes int    `json:"ttl_minutes"`
+		UniqueID   string `json:"unique_id"`
 	}{
 		Nonce:      nonce,
 		TTLMinutes: marsTTLMinutes,
-		UniqueID:   c.auth.PhoneID,
+		UniqueID:   auth.PhoneID,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("mars: marshal body: %w", err)
 	}
 
-	sig := marsSignBody(c.auth.AccessToken, body)
+	sig := marsSignBody(auth.AccessToken, body)
 	reqID := md5HexOf(md5HexOf(nonce))
 
 	url := marsBaseURL + marsRegisterPath + deviceID
@@ -118,7 +119,7 @@ func (c *Client) MarsRegisterGWUser(ctx context.Context, deviceID string) (acces
 	req.Header.Set("Content-Type", "application/json;charset=utf-8")
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("User-Agent", marsUserAgent)
-	req.Header.Set("access_token", c.auth.AccessToken)
+	req.Header.Set("access_token", auth.AccessToken)
 	req.Header.Set("requestid", reqID)
 	req.Header.Set("signature2", sig)
 	req.Header.Set("appid", marsAppID)

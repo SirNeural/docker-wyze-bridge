@@ -3,6 +3,7 @@ package mqtt
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/IDisposable/docker-wyze-bridge/internal/camera"
 )
@@ -29,6 +30,46 @@ func (c *Client) PublishCameraState(cam *camera.Camera) {
 		audioStr = "true"
 	}
 	c.publish(fmt.Sprintf("%s/%s/audio", c.topic, name), audioStr, true)
+	c.PublishCameraMotion(cam)
+}
+
+// PublishCameraMotion also clears retained signals when motion is disabled.
+// Serialize capture/publication against reconnect and camera-state publishers.
+func (c *Client) PublishCameraMotion(cam *camera.Camera) {
+	c.motionPublishMu.Lock()
+	defer c.motionPublishMu.Unlock()
+	snap := cam.Snapshot()
+	value := "2"
+	var timestamp int64
+	if c.motionEnabled {
+		if snap.MotionDetected {
+			value = "1"
+		}
+		if !snap.MotionTimestamp.IsZero() {
+			timestamp = snap.MotionTimestamp.Unix()
+		}
+	}
+	base := fmt.Sprintf("%s/%s", c.topic, snap.Info.Name)
+	c.publish(base+"/motion", value, true)
+	c.publish(base+"/motion_ts", strconv.FormatInt(timestamp, 10), true)
+}
+
+func (c *Client) PublishMotionAvailability(healthy bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.motionHealthy == healthy {
+		return
+	}
+	c.motionHealthy = healthy
+	c.publishMotionAvailabilityLocked()
+}
+
+func (c *Client) publishMotionAvailabilityLocked() {
+	value := "offline"
+	if c.motionEnabled && c.motionHealthy {
+		value = "online"
+	}
+	c.publish(fmt.Sprintf("%s/bridge/motion_state", c.topic), value, true)
 }
 
 // PublishCameraInfo publishes static camera information.

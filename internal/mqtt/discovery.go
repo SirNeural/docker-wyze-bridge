@@ -26,7 +26,9 @@ func haDevice(cam *camera.Camera) map[string]interface{} {
 // and the bridge-wide sensors.
 func (c *Client) PublishAllDiscovery() {
 	c.PublishBridgeDiscovery()
-	for _, cam := range c.camMgr.Cameras() {
+	cameras := c.camMgr.Cameras()
+	c.syncMotionDiscovery(cameras)
+	for _, cam := range cameras {
 		c.PublishDiscovery(cam)
 		c.publishMetricsDiscovery(cam)
 	}
@@ -38,6 +40,8 @@ func (c *Client) PublishDiscovery(cam *camera.Camera) {
 	name := cam.Name()
 	mac := info.MAC
 	device := haDeviceFromInfo(info)
+
+	c.PublishMotionDiscovery(cam)
 
 	// Camera entity
 	c.publishDiscoveryConfig(fmt.Sprintf("%s/camera/%s/config", c.dtopic, mac), map[string]interface{}{
@@ -281,6 +285,7 @@ func (c *Client) RemoveDiscovery(mac string) {
 		{"switch", "_irled"},
 		{"switch", "_status_light"},
 		{"switch", "_motion_detection"},
+		{"binary_sensor", "_motion"},
 		{"switch", "_motion_tagging"},
 		{"number", "_bitrate"},
 		{"number", "_fps"},
@@ -300,4 +305,60 @@ func (c *Client) publishDiscoveryConfig(topic string, config map[string]interfac
 		return
 	}
 	c.publish(topic, string(data), true)
+}
+
+func (c *Client) PublishMotionDiscovery(cam *camera.Camera) {
+	info := cam.GetInfo()
+	motionTopic := fmt.Sprintf("%s/binary_sensor/%s_motion/config", c.dtopic, info.MAC)
+	if !c.motionEnabled {
+		c.RemoveMotionDiscovery(info.MAC)
+		return
+	}
+	c.motionPublishMu.Lock()
+	defer c.motionPublishMu.Unlock()
+	if c.motionDiscovery == nil {
+		c.motionDiscovery = make(map[string]string)
+	}
+	c.motionDiscovery[info.MAC] = info.Name
+	c.publishDiscoveryConfig(motionTopic, map[string]interface{}{
+		"name":              info.Nickname + " Motion",
+		"unique_id":         "wyze_" + info.MAC + "_motion",
+		"device_class":      "motion",
+		"state_topic":       fmt.Sprintf("%s/%s/motion", c.topic, info.Name),
+		"payload_on":        "1",
+		"payload_off":       "2",
+		"availability_mode": "all",
+		"availability": []map[string]string{
+			{"topic": fmt.Sprintf("%s/bridge/state", c.topic), "payload_available": "online", "payload_not_available": "offline"},
+			{"topic": fmt.Sprintf("%s/bridge/motion_state", c.topic), "payload_available": "online", "payload_not_available": "offline"},
+		},
+		"device": haDeviceFromInfo(info),
+	})
+}
+
+func (c *Client) RemoveMotionDiscovery(mac string) {
+	c.motionPublishMu.Lock()
+	defer c.motionPublishMu.Unlock()
+	delete(c.motionDiscovery, mac)
+	c.publish(fmt.Sprintf("%s/binary_sensor/%s_motion/config", c.dtopic, mac), "", true)
+}
+
+// Reconnect must clean up cameras removed or renamed while MQTT was offline.
+func (c *Client) syncMotionDiscovery(cameras []*camera.Camera) {
+	current := make(map[string]string)
+	for _, cam := range cameras {
+		info := cam.GetInfo()
+		current[info.MAC] = info.Name
+	}
+	c.motionPublishMu.Lock()
+	defer c.motionPublishMu.Unlock()
+	for mac, name := range c.motionDiscovery {
+		if next, exists := current[mac]; !exists || next != name {
+			c.publish(fmt.Sprintf("%s/%s/motion", c.topic, name), "2", true)
+			if !exists {
+				c.publish(fmt.Sprintf("%s/binary_sensor/%s_motion/config", c.dtopic, mac), "", true)
+				delete(c.motionDiscovery, mac)
+			}
+		}
+	}
 }

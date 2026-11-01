@@ -448,6 +448,28 @@ Published on startup and on camera add/remove to `{dtopic}/...`:
 
 **Select entity** for quality (`hd`/`sd`), **switch entity** for audio, **select entity** for night vision — matching current bridge HA entities for backward compatibility.
 
+#### 5.4.5 Cloud Motion Events (`internal/motion/`)
+
+Opt-in `MOTION_API` polls the signed Wyze v4 event list using the current
+camera inventory. Native motion alarm types 1, 6, 7, and 13 are accepted;
+sound and unrelated alarms are not motion. This is cloud delivery, not a
+local TUTK alarm push stream, and does not decode video.
+
+The poller retains only bounded, recent event metadata in RAM. It excludes
+pre-startup, stale, future, duplicate, and out-of-order events. Clear timers
+run independently of HTTP requests, and camera replacement/removal clears
+old pulses and updates motion discovery. MQTT reconnect republishes current
+state; restart starts clear. Motion availability requires the bridge and
+cloud feed, not an open video stream. Failures appear in the issues registry;
+HTTP 429, Retry-After, and Wyze reset headers drive backoff.
+
+Auth state is copied under a mutex, with automatic authentication serialized,
+so polling can safely coexist with camera discovery and controls. Event
+requests are cancellable; event response bodies and media URLs are not logged
+even at trace level. No recordings or thumbnails are fetched or written.
+
+See [cloud motion setup and HKSV limits](../MIGRATION.md#opt-in-cloud-motion-events-and-scrypted).
+
 ### 5.5 WebUI (`internal/webui/`)
 
 **Complete rewrite.** No Flask, no Jinja2, no Python template porting.
@@ -796,6 +818,12 @@ MQTT_USERNAME       string
 MQTT_PASSWORD       string
 MQTT_TOPIC          string   default "wyzebridge"
 MQTT_DISCOVERY_TOPIC         string   HA discovery prefix, default "homeassistant"
+
+# Motion options are environment-only (not config.yml).
+MOTION_API          bool     default false; camera-native detections via Wyze cloud
+MOTION_INT          duration default 5s; 1s..1m; bare seconds also accepted
+MOTION_RESET        duration default 10s; 1s..5m; inferred motion clear timeout
+MOTION_MAX_AGE      duration default 30s; 1s..5m; must be >= MOTION_INT when enabled
 
 # ── Camera Filtering ─────────────────────────────────────────────────────────
 FILTER_NAMES        string   comma-separated camera names to include

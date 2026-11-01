@@ -47,6 +47,12 @@ type Config struct {
 	MQTTTopic          string
 	MQTTDiscoveryTopic string // HA discovery prefix
 
+	// Camera-native motion delivered through the Wyze cloud event API.
+	MotionAPI      bool
+	MotionInterval time.Duration
+	MotionReset    time.Duration
+	MotionMaxAge   time.Duration
+
 	// Camera Filtering
 	FilterNames  []string
 	FilterModels []string
@@ -262,6 +268,9 @@ func Load() (*Config, error) {
 	// Load per-camera overrides from env
 	cfg.loadCamOverrides()
 
+	if err := cfg.loadMotion(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
