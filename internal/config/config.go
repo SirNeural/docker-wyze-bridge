@@ -47,10 +47,12 @@ type Config struct {
 	MQTTTopic          string
 	MQTTDiscoveryTopic string // HA discovery prefix
 
-	// Camera-native motion delivered through the Wyze cloud event API.
+	// Camera-native motion and sound delivered through the Wyze cloud event API.
 	MotionAPI      bool
+	SoundAPI       bool
 	MotionInterval time.Duration
 	MotionReset    time.Duration
+	SoundReset     time.Duration
 	MotionMaxAge   time.Duration
 
 	// Camera Filtering

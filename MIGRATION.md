@@ -62,6 +62,8 @@ environment:
   MOTION_INT: "5s"
   MOTION_RESET: "10s"
   MOTION_MAX_AGE: "30s"
+  SOUND_API: "true"
+  SOUND_RESET: "10s"
   MQTT_HOST: "YOUR_LOCAL_BROKER"
   MQTT_PORT: "1883"
   MQTT_USERNAME: "${MQTT_USERNAME}"
@@ -75,6 +77,23 @@ Existing Docker secret support for MQTT credentials is unchanged.
 `MOTION_INT=1.5`; invalid options fail startup rather than silently falling
 back. See [the configuration reference](DOCS/DESIGN.md#581-complete-environment-variable-reference)
 for bounds. `MOTION_START` is not implemented: events never force a stream on.
+
+`SOUND_API` is a separate opt-in (default false). It forwards Wyze sound
+events (alarm type 2) to `{MQTT_TOPIC}/{cam}/sound` (`1` detected, `2` clear)
+and `sound_ts` (last event's Unix timestamp in seconds). Motion and sound
+share one cloud request, `MOTION_INT`, and `MOTION_MAX_AGE`; each has its own
+state and clear timer (`MOTION_RESET` vs `SOUND_RESET`). Sound alone can be
+enabled with `MOTION_API=false`. Sound never sets motion or triggers the
+Scrypted motion sensor. Smoke, CO, and other alarm types are not relabeled
+as generic sound.
+
+Enable **sound event recording** in the Wyze app to produce sound events.
+Cloud latency, recording schedules, plan limits, and the shared 20-event
+batch cap also apply to sound. This forwards event metadata, not microphone
+audio or continuously analyzed audio. Existing stream audio is unchanged.
+Sound has separate HA binary-sensor discovery and cloud availability at
+`{MQTT_TOPIC}/bridge/sound_state`; it does not automatically add a sound
+recording trigger to Apple Home.
 
 ### Wyze prerequisites and limits
 

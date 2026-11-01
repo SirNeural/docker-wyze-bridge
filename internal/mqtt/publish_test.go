@@ -71,14 +71,14 @@ func TestMotionPublication_ReconnectResetAndAvailability(t *testing.T) {
 	if msg := recorder.last(t, "test/front/motion"); msg.payload != "1" || !msg.retained {
 		t.Fatal("active motion was not retained")
 	}
-	c.PublishMotionAvailability(true)
+	c.PublishDetectionAvailability(true)
 	c.onConnect()
 	if recorder.last(t, "test/front/motion").payload != "1" || recorder.last(t, "test/bridge/motion_state").payload != "online" {
 		t.Fatal("reconnect did not restore current motion and cloud availability")
 	}
 	cam.SetMotion(false, time.Time{})
 	c.PublishCameraMotion(cam)
-	c.PublishMotionAvailability(false)
+	c.PublishDetectionAvailability(false)
 	c.onConnect()
 	if recorder.last(t, "test/front/motion").payload != "2" || recorder.last(t, "test/front/motion_ts").payload != "1700000000" {
 		t.Fatal("clear or reconnect lost the last real detection timestamp")
@@ -106,7 +106,7 @@ func TestMotionDiscovery_RenameDisableAndRemoval(t *testing.T) {
 		publishSem: make(chan struct{}, maxInflightPublishes), log: zerolog.Nop(),
 	}
 	cam := camera.NewCamera(wyzeapi.CameraInfo{Name: "renamed", Nickname: "Front", MAC: "AA"}, "hd", true, false)
-	c.PublishMotionDiscovery(cam)
+	c.PublishDetectionDiscovery(cam)
 	msg := recorder.last(t, "ha/binary_sensor/AA_motion/config")
 	var entity struct {
 		StateTopic       string `json:"state_topic"`
@@ -128,10 +128,47 @@ func TestMotionDiscovery_RenameDisableAndRemoval(t *testing.T) {
 	}
 	c.motionEnabled = false
 	cam.SetMotion(true, time.Now())
-	c.PublishMotionDiscovery(cam)
+	c.PublishDetectionDiscovery(cam)
 	c.PublishCameraMotion(cam)
 	if recorder.last(t, "ha/binary_sensor/AA_motion/config").payload != "" || recorder.last(t, "test/renamed/motion").payload != "2" {
 		t.Fatal("disabling motion left a discoverable or active retained sensor")
+	}
+}
+
+func TestSoundPublication_DiscoveryReconnectClearAndDisable(t *testing.T) {
+	recorder := &motionRecordingClient{}
+	cam := camera.NewCamera(wyzeapi.CameraInfo{Name: "front", MAC: "AA"}, "hd", true, false)
+	mgr := camera.NewManager(&config.Config{}, nil, nil, zerolog.Nop())
+	mgr.InjectCamera("front", cam)
+	c := &Client{
+		paho: recorder, camMgr: mgr, topic: "test", dtopic: "ha", soundEnabled: true,
+		publishSem: make(chan struct{}, maxInflightPublishes), log: zerolog.Nop(),
+	}
+	cam.SetSound(true, time.Unix(1700000000, 0))
+	c.PublishDetectionAvailability(true)
+	c.onConnect()
+	if recorder.last(t, "test/front/sound").payload != "1" || recorder.last(t, "test/front/motion").payload != "2" ||
+		recorder.last(t, "test/bridge/sound_state").payload != "online" || recorder.last(t, "test/bridge/motion_state").payload != "offline" {
+		t.Fatal("sound-only reconnect incorrectly published motion or availability")
+	}
+	var entity map[string]interface{}
+	if err := json.Unmarshal([]byte(recorder.last(t, "ha/binary_sensor/AA_sound/config").payload), &entity); err != nil {
+		t.Fatal(err)
+	}
+	if entity["device_class"] != "sound" || entity["state_topic"] != "test/front/sound" {
+		t.Fatal("sound discovery was not separate")
+	}
+	cam.SetSound(false, time.Time{})
+	c.PublishCameraSound(cam)
+	if recorder.last(t, "test/front/sound").payload != "2" || recorder.last(t, "test/front/sound_ts").payload != "1700000000" {
+		t.Fatal("sound clear lost its real event timestamp")
+	}
+	c.soundEnabled = false
+	cam.SetSound(true, time.Now())
+	c.PublishDetectionDiscovery(cam)
+	c.PublishCameraSound(cam)
+	if recorder.last(t, "ha/binary_sensor/AA_sound/config").payload != "" || recorder.last(t, "test/front/sound").payload != "2" {
+		t.Fatal("disabled sound retained discovery or an active state")
 	}
 }
 

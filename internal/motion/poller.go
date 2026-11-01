@@ -1,4 +1,4 @@
-// Package motion forwards camera-native detections without decoding video.
+// Package motion forwards camera-native motion and sound without decoding media.
 package motion
 
 import (
@@ -16,12 +16,14 @@ import (
 )
 
 type EventSource interface {
-	GetMotionEvents(context.Context, []string, int64, int64) ([]wyzeapi.MotionEvent, error)
+	GetDetectionEvents(context.Context, []string, int64, int64, bool, bool) ([]wyzeapi.DetectionEvent, error)
 }
 
 type activeMotion struct {
-	camera *camera.Camera
-	until  time.Time
+	camera   *camera.Camera
+	until    time.Time
+	deviceID string
+	kind     wyzeapi.DetectionKind
 }
 
 type Poller struct {
@@ -29,6 +31,9 @@ type Poller struct {
 	cameras        func() []*camera.Camera
 	interval       time.Duration
 	reset          time.Duration
+	soundReset     time.Duration
+	motionEnabled  bool
+	soundEnabled   bool
 	maxAge         time.Duration
 	startedAt      time.Time
 	seen           map[string]time.Time
@@ -36,6 +41,7 @@ type Poller struct {
 	known          map[string]*camera.Camera
 	log            zerolog.Logger
 	OnMotion       func(*camera.Camera)
+	OnSound        func(*camera.Camera)
 	OnStatus       func(error)
 	OnCameraChange func(oldCamera, newCamera *camera.Camera)
 }
@@ -44,6 +50,7 @@ func New(source EventSource, cameras func() []*camera.Camera, cfg *config.Config
 	return &Poller{
 		source: source, cameras: cameras, interval: cfg.MotionInterval,
 		reset: cfg.MotionReset, maxAge: cfg.MotionMaxAge, log: log,
+		soundReset: cfg.SoundReset, motionEnabled: cfg.MotionAPI, soundEnabled: cfg.SoundAPI,
 		seen: make(map[string]time.Time), active: make(map[string]activeMotion),
 		known: make(map[string]*camera.Camera),
 	}
@@ -89,7 +96,7 @@ func (p *Poller) Run(ctx context.Context) {
 				p.OnStatus(r.err)
 			}
 			if r.err != nil {
-				p.log.Warn().Err(r.err).Msg("Wyze motion event polling failed")
+				p.log.Warn().Err(r.err).Msg("Wyze detection event polling failed")
 				continue
 			}
 			p.apply(r.events, time.Now())
@@ -123,7 +130,7 @@ func (p *Poller) poll(ctx context.Context, results chan<- result) {
 			begin = p.startedAt
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		events, err := p.source.GetMotionEvents(requestCtx, macs, begin.UnixMilli(), now.UnixMilli())
+		events, err := p.source.GetDetectionEvents(requestCtx, macs, begin.UnixMilli(), now.UnixMilli(), p.motionEnabled, p.soundEnabled)
 		cancel()
 		if ctx.Err() != nil {
 			return
@@ -155,7 +162,11 @@ func (p *Poller) apply(events []wyzeapi.MotionEvent, now time.Time) {
 	for _, event := range events {
 		id := normalizeID(event.DeviceID)
 		cam := cameras[id]
-		key := id + "/" + event.ID
+		activeKey := id + "/" + strconv.Itoa(int(event.Kind))
+		key := activeKey + "/" + event.ID
+		if (event.Kind == wyzeapi.MotionDetection && !p.motionEnabled) || (event.Kind == wyzeapi.SoundDetection && !p.soundEnabled) {
+			continue
+		}
 		if cam == nil || event.Timestamp.Before(p.startedAt) || now.Sub(event.Timestamp) > p.maxAge || event.Timestamp.After(now) {
 			continue
 		}
@@ -163,14 +174,18 @@ func (p *Poller) apply(events []wyzeapi.MotionEvent, now time.Time) {
 			continue
 		}
 		p.seen[key] = event.Timestamp.Add(p.maxAge)
-		if !event.Timestamp.After(cam.Snapshot().MotionTimestamp) {
+		snap := cam.Snapshot()
+		previous := snap.MotionTimestamp
+		reset := p.reset
+		if event.Kind == wyzeapi.SoundDetection {
+			previous = snap.SoundTimestamp
+			reset = p.soundReset
+		}
+		if !event.Timestamp.After(previous) {
 			continue // Out-of-order events must not extend or replay a pulse.
 		}
-		cam.SetMotion(true, event.Timestamp)
-		p.active[id] = activeMotion{cam, now.Add(p.reset)}
-		if p.OnMotion != nil {
-			p.OnMotion(cam)
-		}
+		p.active[activeKey] = activeMotion{camera: cam, until: now.Add(reset), deviceID: id, kind: event.Kind}
+		p.setDetection(cam, event.Kind, true, event.Timestamp)
 	}
 }
 
@@ -180,7 +195,7 @@ func (p *Poller) expire(now time.Time) {
 		current[normalizeID(cam.GetInfo().MAC)] = cam
 	}
 	for id, active := range p.active {
-		if !now.Before(active.until) || current[id] != active.camera {
+		if !now.Before(active.until) || current[active.deviceID] != active.camera {
 			p.clear(id)
 		}
 	}
@@ -192,10 +207,13 @@ func (p *Poller) expire(now time.Time) {
 	for id, cam := range current {
 		if old := p.known[id]; old != cam {
 			var timestamp time.Time
+			var soundTimestamp time.Time
 			if old != nil {
 				timestamp = old.Snapshot().MotionTimestamp
+				soundTimestamp = old.Snapshot().SoundTimestamp
 			}
 			cam.SetMotion(false, timestamp)
+			cam.SetSound(false, soundTimestamp)
 			if p.OnCameraChange != nil {
 				p.OnCameraChange(old, cam)
 			}
@@ -210,11 +228,21 @@ func (p *Poller) expire(now time.Time) {
 }
 
 func (p *Poller) clear(id string) {
-	cam := p.active[id].camera
-	cam.SetMotion(false, time.Time{})
+	active := p.active[id]
 	delete(p.active, id)
-	if p.OnMotion != nil {
-		p.OnMotion(cam)
+	p.setDetection(active.camera, active.kind, false, time.Time{})
+}
+
+func (p *Poller) setDetection(cam *camera.Camera, kind wyzeapi.DetectionKind, detected bool, timestamp time.Time) {
+	callback := p.OnMotion
+	if kind == wyzeapi.SoundDetection {
+		cam.SetSound(detected, timestamp)
+		callback = p.OnSound
+	} else {
+		cam.SetMotion(detected, timestamp)
+	}
+	if callback != nil {
+		callback(cam)
 	}
 }
 

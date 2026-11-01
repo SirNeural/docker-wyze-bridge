@@ -24,25 +24,26 @@ const maxInflightPublishes = 1024
 // to the bridge's shutdown so fire-and-forget work cancels cleanly.
 // publishSem bounds concurrent publish-waiter goroutines.
 type Client struct {
-	log             zerolog.Logger
-	paho            paho.Client
-	topic           string // MQTT_TOPIC, default "wyzebridge"
-	dtopic          string // MQTT_DISCOVERY_TOPIC, default "homeassistant"
-	camMgr          *camera.Manager
-	wyzeAPI         *wyzeapi.Client
-	bridgeIP        string
-	rootCtx         context.Context
-	publishSem      chan struct{}
-	droppedPubs     atomic.Uint64
-	onSnapshot      func(ctx context.Context, camName string)         // snapshot trigger callback
-	onRecord        func(ctx context.Context, camName, action string) // record start/stop callback (action = "start"|"stop")
-	onDiscover      func(ctx context.Context)                         // bridge-wide rediscovery trigger
-	mu              sync.Mutex
-	connected       bool
-	motionEnabled   bool
-	motionHealthy   bool
-	motionPublishMu sync.Mutex
-	motionDiscovery map[string]string
+	log                zerolog.Logger
+	paho               paho.Client
+	topic              string // MQTT_TOPIC, default "wyzebridge"
+	dtopic             string // MQTT_DISCOVERY_TOPIC, default "homeassistant"
+	camMgr             *camera.Manager
+	wyzeAPI            *wyzeapi.Client
+	bridgeIP           string
+	rootCtx            context.Context
+	publishSem         chan struct{}
+	droppedPubs        atomic.Uint64
+	onSnapshot         func(ctx context.Context, camName string)         // snapshot trigger callback
+	onRecord           func(ctx context.Context, camName, action string) // record start/stop callback (action = "start"|"stop")
+	onDiscover         func(ctx context.Context)                         // bridge-wide rediscovery trigger
+	mu                 sync.Mutex
+	connected          bool
+	motionEnabled      bool
+	soundEnabled       bool
+	detectionHealthy   bool
+	detectionPublishMu sync.Mutex
+	detectionDiscovery map[string]string
 }
 
 // Config holds MQTT connection settings.
@@ -54,6 +55,7 @@ type Config struct {
 	Topic          string
 	DiscoveryTopic string
 	MotionEnabled  bool
+	SoundEnabled   bool
 }
 
 // NewClient creates a new MQTT client. ctx is the bridge's
@@ -70,6 +72,7 @@ func NewClient(ctx context.Context, cfg Config, camMgr *camera.Manager, api *wyz
 		rootCtx:       ctx,
 		publishSem:    make(chan struct{}, maxInflightPublishes),
 		motionEnabled: cfg.MotionEnabled,
+		soundEnabled:  cfg.SoundEnabled,
 	}
 
 	opts := paho.NewClientOptions()
@@ -159,7 +162,7 @@ func (c *Client) onConnect() {
 	// Publish bridge online
 	c.publish(fmt.Sprintf("%s/bridge/state", c.topic), "online", true)
 	c.mu.Lock()
-	c.publishMotionAvailabilityLocked()
+	c.publishDetectionAvailabilityLocked()
 	c.mu.Unlock()
 
 	// Re-subscribe to command topics

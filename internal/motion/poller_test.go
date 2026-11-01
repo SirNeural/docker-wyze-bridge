@@ -16,7 +16,7 @@ import (
 
 type eventSourceFunc func(context.Context, []string, int64, int64) ([]wyzeapi.MotionEvent, error)
 
-func (f eventSourceFunc) GetMotionEvents(ctx context.Context, macs []string, begin, end int64) ([]wyzeapi.MotionEvent, error) {
+func (f eventSourceFunc) GetDetectionEvents(ctx context.Context, macs []string, begin, end int64, motion, sound bool) ([]wyzeapi.DetectionEvent, error) {
 	return f(ctx, macs, begin, end)
 }
 
@@ -25,7 +25,7 @@ func TestMotionLifecycle_DuplicatesLateEventsAndRediscovery(t *testing.T) {
 	cam := camera.NewCamera(wyzeapi.CameraInfo{MAC: "AABBCC", Name: "front"}, "hd", true, false)
 	inventory := []*camera.Camera{cam}
 	p := New(nil, func() []*camera.Camera { return inventory }, &config.Config{
-		MotionInterval: time.Second, MotionReset: time.Second, MotionMaxAge: 30 * time.Second,
+		MotionAPI: true, MotionInterval: time.Second, MotionReset: time.Second, MotionMaxAge: 30 * time.Second,
 	}, zerolog.Nop())
 	p.startedAt = now.Add(-time.Minute)
 	changes := 0
@@ -76,7 +76,7 @@ func TestMotionLifecycle_RejectsHistoricalFutureAndUnknownEvents(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	cam := camera.NewCamera(wyzeapi.CameraInfo{MAC: "AA"}, "hd", false, false)
 	p := New(nil, func() []*camera.Camera { return []*camera.Camera{cam} }, &config.Config{
-		MotionReset: time.Second, MotionMaxAge: 30 * time.Second,
+		MotionAPI: true, MotionReset: time.Second, MotionMaxAge: 30 * time.Second,
 	}, zerolog.Nop())
 	p.startedAt = now.Add(-time.Minute)
 	p.apply([]wyzeapi.MotionEvent{
@@ -104,7 +104,7 @@ func TestRun_ClearsWhileCloudRequestIsBlockedAndCancels(t *testing.T) {
 		return nil, ctx.Err()
 	})
 	p := New(source, func() []*camera.Camera { return []*camera.Camera{cam} }, &config.Config{
-		MotionInterval: 10 * time.Millisecond, MotionReset: 20 * time.Millisecond, MotionMaxAge: 30 * time.Second,
+		MotionAPI: true, MotionInterval: 10 * time.Millisecond, MotionReset: 20 * time.Millisecond, MotionMaxAge: 30 * time.Second,
 	}, zerolog.Nop())
 	changes := make(chan bool, 4)
 	p.OnMotion = func(cam *camera.Camera) { changes <- cam.Snapshot().MotionDetected }
@@ -159,5 +159,75 @@ func TestMotionBackoff_RespectsRateLimitAndCapsOrdinaryFailures(t *testing.T) {
 	}
 	if delay := retryDelay(errors.New("network"), 100, time.Minute, now); delay != 5*time.Minute {
 		t.Errorf("unbounded network backoff: %s", delay)
+	}
+}
+
+func TestSoundLifecycle_IsIndependentOfMotion(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	cam := camera.NewCamera(wyzeapi.CameraInfo{MAC: "AA"}, "hd", true, false)
+	inventory := []*camera.Camera{cam}
+	p := New(nil, func() []*camera.Camera { return inventory }, &config.Config{
+		MotionAPI: true, SoundAPI: true, MotionReset: time.Second, SoundReset: 2 * time.Second, MotionMaxAge: 30 * time.Second,
+	}, zerolog.Nop())
+	p.startedAt = now.Add(-time.Minute)
+	motionChanges, soundChanges := 0, 0
+	p.OnMotion = func(*camera.Camera) { motionChanges++ }
+	p.OnSound = func(*camera.Camera) { soundChanges++ }
+	sound := wyzeapi.DetectionEvent{ID: "shared", DeviceID: "AA", Timestamp: now, Kind: wyzeapi.SoundDetection}
+	p.apply([]wyzeapi.DetectionEvent{sound}, now)
+	p.apply([]wyzeapi.DetectionEvent{sound}, now.Add(500*time.Millisecond))
+	if cam.Snapshot().MotionDetected || !cam.Snapshot().SoundDetected || motionChanges != 0 || soundChanges != 1 {
+		t.Fatal("sound triggered motion or a duplicate sound notification")
+	}
+	motion := wyzeapi.DetectionEvent{ID: "shared", DeviceID: "AA", Timestamp: now.Add(500 * time.Millisecond)}
+	p.apply([]wyzeapi.DetectionEvent{motion}, motion.Timestamp)
+	p.expire(now.Add(1600 * time.Millisecond))
+	if cam.Snapshot().MotionDetected || !cam.Snapshot().SoundDetected {
+		t.Fatal("motion reset incorrectly cleared sound")
+	}
+	p.expire(now.Add(2100 * time.Millisecond))
+	if cam.Snapshot().SoundDetected || !cam.Snapshot().SoundTimestamp.Equal(now) || soundChanges != 2 {
+		t.Fatal("sound did not clear independently while preserving its timestamp")
+	}
+	p.apply([]wyzeapi.DetectionEvent{sound}, now.Add(2200*time.Millisecond))
+	if soundChanges != 2 {
+		t.Fatal("cleared sound event was replayed")
+	}
+	p.apply([]wyzeapi.DetectionEvent{{ID: "new", DeviceID: "AA", Timestamp: now.Add(3 * time.Second), Kind: wyzeapi.SoundDetection}}, now.Add(3*time.Second))
+	inventory = nil
+	p.expire(now.Add(3100 * time.Millisecond))
+	if cam.Snapshot().SoundDetected {
+		t.Fatal("removed camera retained sound")
+	}
+}
+
+func TestSoundOnly_DoesNotCreateMotionAndSharesPolling(t *testing.T) {
+	cam := camera.NewCamera(wyzeapi.CameraInfo{MAC: "AA"}, "hd", false, false)
+	var p *Poller
+	source := eventSourceFunc(func(context.Context, []string, int64, int64) ([]wyzeapi.MotionEvent, error) {
+		return []wyzeapi.DetectionEvent{
+			{ID: "motion", DeviceID: "AA", Timestamp: time.Now()},
+			{ID: "sound", DeviceID: "AA", Timestamp: time.Now(), Kind: wyzeapi.SoundDetection},
+		}, nil
+	})
+	p = New(source, func() []*camera.Camera { return []*camera.Camera{cam} }, &config.Config{
+		SoundAPI: true, SoundReset: time.Second, MotionInterval: time.Hour, MotionMaxAge: 30 * time.Second,
+	}, zerolog.Nop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	p.OnSound = func(cam *camera.Camera) {
+		if cam.Snapshot().SoundDetected {
+			cancel()
+		}
+	}
+	go func() { p.Run(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sound-only polling did not deliver and stop")
+	}
+	if cam.Snapshot().MotionDetected || cam.Snapshot().SoundDetected || cam.Snapshot().SoundTimestamp.IsZero() {
+		t.Fatal("sound-only polling triggered motion or failed to clear at shutdown")
 	}
 }

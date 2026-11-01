@@ -230,6 +230,7 @@ All entities use availability from `{topic}/{cam}/state` (connected/disconnected
 | `thumbnail` binary | Implemented |
 | `recording` state | Implemented |
 | Cloud motion events (`motion`, `motion_ts`, HA binary sensor) | Implemented, opt-in `MOTION_API` |
+| Cloud sound events (`sound`, `sound_ts`, HA binary sensor) | Implemented, opt-in `SOUND_API` |
 | HA discovery: camera, quality, audio, night_vision | Implemented |
 | `quality/set`, `audio/set`, `night_vision/set` | Implemented |
 | Snapshot trigger | Implemented |
@@ -260,6 +261,9 @@ cloud event API. It does not implement the deferred local camera alarm stream.
 | `{topic}/{cam}/motion` | `1` for detection; `2` for clear |
 | `{topic}/{cam}/motion_ts` | Last accepted event's Unix timestamp in seconds; `0` before any detection |
 | `{topic}/bridge/motion_state` | `online` after a successful poll; `offline` initially or on cloud failure |
+| `{topic}/{cam}/sound` | `1` for sound detection; `2` for clear |
+| `{topic}/{cam}/sound_ts` | Last accepted sound event's Unix timestamp in seconds; `0` initially |
+| `{topic}/bridge/sound_state` | Shared feed health when sound enabled; `offline` when disabled or unavailable |
 
 Motion is an inferred pulse: it clears after `MOTION_RESET` without a newer
 detection, even if the API is blocked, rate-limited, or unavailable. A clear
@@ -274,6 +278,12 @@ still makes the sensor unavailable when the bridge disconnects.
 
 Camera REST status exposes `motion` (boolean) and `motion_ts` (Unix
 milliseconds, `0` initially); `camera_motion` SSE events announce changes.
+`sound`, `sound_ts`, and `camera_sound` provide the corresponding independent
+sound state. `SOUND_RESET` clears sound independently of motion, network
+failures, and video state. Sound never becomes a motion event. Enabling
+both features uses a single filtered cloud request, not two polling loops.
+Sound discovery uses the bridge and `sound_state` availability topics.
+Restart/reconnect, disable, rename, and removal cleanup apply to both types.
 Event metadata is transient and event media is never downloaded. Broker
 persistence of retained MQTT messages is controlled by the broker, not here.
 

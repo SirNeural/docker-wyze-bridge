@@ -253,7 +253,7 @@ func main() {
 
 	// Start all background goroutines. The WebUI listener is already running
 	motionDone := make(chan struct{})
-	if cfg.MotionAPI {
+	if cfg.MotionAPI || cfg.SoundAPI {
 		motionLog := log.With().Str("c", "motion").Logger()
 		poller := motion.New(apiClient, camMgr.Cameras, cfg, motionLog)
 		poller.OnMotion = func(cam *camera.Camera) {
@@ -262,27 +262,34 @@ func main() {
 			}
 			webServer.SSE().SendJSON("camera_motion", cam.StatusJSON())
 		}
+		poller.OnSound = func(cam *camera.Camera) {
+			if mqttClient != nil && mqttClient.IsConnected() {
+				mqttClient.PublishCameraSound(cam)
+			}
+			webServer.SSE().SendJSON("camera_sound", cam.StatusJSON())
+		}
 		poller.OnCameraChange = func(oldCamera, newCamera *camera.Camera) {
 			if mqttClient == nil || !mqttClient.IsConnected() {
 				return
 			}
 			if newCamera != nil {
 				mqttClient.PublishCameraMotion(newCamera)
-				mqttClient.PublishMotionDiscovery(newCamera)
+				mqttClient.PublishCameraSound(newCamera)
+				mqttClient.PublishDetectionDiscovery(newCamera)
 			} else {
-				mqttClient.RemoveMotionDiscovery(oldCamera.GetInfo().MAC)
+				mqttClient.RemoveDetectionDiscovery(oldCamera.GetInfo().MAC)
 			}
 		}
 		poller.OnStatus = func(err error) {
 			if mqttClient != nil {
-				mqttClient.PublishMotionAvailability(err == nil)
+				mqttClient.PublishDetectionAvailability(err == nil)
 			}
 			if err == nil {
 				issueReg.Resolve("motion/cloud")
 			} else if ctx.Err() == nil {
 				issueReg.Report(issues.Issue{
 					ID: "motion/cloud", Scope: "motion", Severity: issues.SeverityWarn,
-					Message: "Wyze cloud motion events are unavailable", Detail: err.Error(),
+					Message: "Wyze cloud detection events are unavailable", Detail: err.Error(),
 				})
 			}
 		}
@@ -290,7 +297,7 @@ func main() {
 			defer close(motionDone)
 			poller.Run(ctx)
 		}()
-		motionLog.Info().Dur("interval", cfg.MotionInterval).Msg("cloud motion events enabled; Wyze recording settings and cooldowns apply")
+		motionLog.Info().Dur("interval", cfg.MotionInterval).Bool("motion", cfg.MotionAPI).Bool("sound", cfg.SoundAPI).Msg("cloud detections enabled; Wyze recording settings and cooldowns apply")
 	} else {
 		close(motionDone)
 	}
@@ -442,6 +449,7 @@ func setupMQTT(ctx context.Context, cfg *config.Config, camMgr *camera.Manager, 
 		Topic:          cfg.MQTTTopic,
 		DiscoveryTopic: cfg.MQTTDiscoveryTopic,
 		MotionEnabled:  cfg.MotionAPI,
+		SoundEnabled:   cfg.SoundAPI,
 	}
 	mqttLog := log.With().Str("c", "mqtt").Logger()
 	mqttClient := mqtt.NewClient(ctx, mqttCfg, camMgr, apiClient, cfg.BridgeIP, mqttLog)

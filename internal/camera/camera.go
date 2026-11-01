@@ -57,6 +57,8 @@ type Camera struct {
 	forceWebRTC     bool
 	motionDetected  bool
 	motionTimestamp time.Time
+	soundDetected   bool
+	soundTimestamp  time.Time
 	mu              sync.RWMutex
 }
 
@@ -244,6 +246,8 @@ type Snapshot struct {
 	ForceWebRTC     bool
 	MotionDetected  bool
 	MotionTimestamp time.Time
+	SoundDetected   bool
+	SoundTimestamp  time.Time
 }
 
 // Snapshot returns a consistent view of the camera under RLock.
@@ -262,6 +266,8 @@ func (c *Camera) Snapshot() Snapshot {
 		ForceWebRTC:     c.forceWebRTC,
 		MotionDetected:  c.motionDetected,
 		MotionTimestamp: c.motionTimestamp,
+		SoundDetected:   c.soundDetected,
+		SoundTimestamp:  c.soundTimestamp,
 	}
 }
 
@@ -272,6 +278,10 @@ func (c *Camera) StatusJSON() map[string]interface{} {
 	var motionTS int64
 	if !c.motionTimestamp.IsZero() {
 		motionTS = c.motionTimestamp.UnixMilli()
+	}
+	var soundTS int64
+	if !c.soundTimestamp.IsZero() {
+		soundTS = c.soundTimestamp.UnixMilli()
 	}
 	return map[string]interface{}{
 		"name":         c.Info.Name,
@@ -290,6 +300,8 @@ func (c *Camera) StatusJSON() map[string]interface{} {
 		"error_count":  c.ErrorCount,
 		"motion":       c.motionDetected,
 		"motion_ts":    motionTS,
+		"sound":        c.soundDetected,
+		"sound_ts":     soundTS,
 	}
 }
 
@@ -301,5 +313,14 @@ func (c *Camera) SetMotion(detected bool, timestamp time.Time) {
 	c.motionDetected = detected
 	if timestamp.After(c.motionTimestamp) {
 		c.motionTimestamp = timestamp
+	}
+}
+
+func (c *Camera) SetSound(detected bool, timestamp time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.soundDetected = detected
+	if timestamp.After(c.soundTimestamp) {
+		c.soundTimestamp = timestamp
 	}
 }

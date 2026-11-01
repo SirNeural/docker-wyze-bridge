@@ -31,45 +31,65 @@ func (c *Client) PublishCameraState(cam *camera.Camera) {
 	}
 	c.publish(fmt.Sprintf("%s/%s/audio", c.topic, name), audioStr, true)
 	c.PublishCameraMotion(cam)
+	c.PublishCameraSound(cam)
 }
 
 // PublishCameraMotion also clears retained signals when motion is disabled.
 // Serialize capture/publication against reconnect and camera-state publishers.
 func (c *Client) PublishCameraMotion(cam *camera.Camera) {
-	c.motionPublishMu.Lock()
-	defer c.motionPublishMu.Unlock()
+	c.publishCameraDetection(cam, false)
+}
+
+func (c *Client) PublishCameraSound(cam *camera.Camera) {
+	c.publishCameraDetection(cam, true)
+}
+
+func (c *Client) publishCameraDetection(cam *camera.Camera, sound bool) {
+	c.detectionPublishMu.Lock()
+	defer c.detectionPublishMu.Unlock()
 	snap := cam.Snapshot()
+	kind, enabled, detected, last := "motion", c.motionEnabled, snap.MotionDetected, snap.MotionTimestamp
+	if sound {
+		kind, enabled, detected, last = "sound", c.soundEnabled, snap.SoundDetected, snap.SoundTimestamp
+	}
 	value := "2"
 	var timestamp int64
-	if c.motionEnabled {
-		if snap.MotionDetected {
+	if enabled {
+		if detected {
 			value = "1"
 		}
-		if !snap.MotionTimestamp.IsZero() {
-			timestamp = snap.MotionTimestamp.Unix()
+		if !last.IsZero() {
+			timestamp = last.Unix()
 		}
 	}
-	base := fmt.Sprintf("%s/%s", c.topic, snap.Info.Name)
-	c.publish(base+"/motion", value, true)
-	c.publish(base+"/motion_ts", strconv.FormatInt(timestamp, 10), true)
+	base := fmt.Sprintf("%s/%s/%s", c.topic, snap.Info.Name, kind)
+	c.publish(base, value, true)
+	c.publish(base+"_ts", strconv.FormatInt(timestamp, 10), true)
 }
 
-func (c *Client) PublishMotionAvailability(healthy bool) {
+func (c *Client) PublishDetectionAvailability(healthy bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.motionHealthy == healthy {
+	if c.detectionHealthy == healthy {
 		return
 	}
-	c.motionHealthy = healthy
-	c.publishMotionAvailabilityLocked()
+	c.detectionHealthy = healthy
+	c.publishDetectionAvailabilityLocked()
 }
 
-func (c *Client) publishMotionAvailabilityLocked() {
-	value := "offline"
-	if c.motionEnabled && c.motionHealthy {
-		value = "online"
+func (c *Client) publishDetectionAvailabilityLocked() {
+	for _, kind := range []struct {
+		name    string
+		enabled bool
+	}{
+		{"motion", c.motionEnabled}, {"sound", c.soundEnabled},
+	} {
+		value := "offline"
+		if kind.enabled && c.detectionHealthy {
+			value = "online"
+		}
+		c.publish(fmt.Sprintf("%s/bridge/%s_state", c.topic, kind.name), value, true)
 	}
-	c.publish(fmt.Sprintf("%s/bridge/motion_state", c.topic), value, true)
 }
 
 // PublishCameraInfo publishes static camera information.

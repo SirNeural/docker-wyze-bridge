@@ -452,7 +452,9 @@ Published on startup and on camera add/remove to `{dtopic}/...`:
 
 Opt-in `MOTION_API` polls the signed Wyze v4 event list using the current
 camera inventory. Native motion alarm types 1, 6, 7, and 13 are accepted;
-sound and unrelated alarms are not motion. This is cloud delivery, not a
+opt-in `SOUND_API` forwards alarm type 2 separately. Both use one filtered
+request and independent state/reset timers. Sound and unrelated alarms are
+never motion. This is cloud delivery, not a
 local TUTK alarm push stream, and does not decode video.
 
 The poller retains only bounded, recent event metadata in RAM. It excludes
@@ -821,8 +823,10 @@ MQTT_DISCOVERY_TOPIC         string   HA discovery prefix, default "homeassistan
 
 # Motion options are environment-only (not config.yml).
 MOTION_API          bool     default false; camera-native detections via Wyze cloud
+SOUND_API           bool     default false; independent camera-native sound events
 MOTION_INT          duration default 5s; 1s..1m; bare seconds also accepted
 MOTION_RESET        duration default 10s; 1s..5m; inferred motion clear timeout
+SOUND_RESET         duration default 10s; 1s..5m; independent sound clear timeout
 MOTION_MAX_AGE      duration default 30s; 1s..5m; must be >= MOTION_INT when enabled
 
 # ── Camera Filtering ─────────────────────────────────────────────────────────

@@ -9,35 +9,68 @@ import (
 	"time"
 )
 
-// MotionEvent is a camera-generated motion detection delivered by Wyze's
+type DetectionKind uint8
+
+const (
+	MotionDetection DetectionKind = iota
+	SoundDetection
+)
+
+// DetectionEvent is a camera-generated detection delivered by Wyze's
 // cloud event feed. It contains no thumbnails, recordings, or signed URLs.
-type MotionEvent struct {
+type DetectionEvent struct {
 	ID        string
 	DeviceID  string
 	Timestamp time.Time
+	Kind      DetectionKind
 }
+
+type MotionEvent = DetectionEvent
 
 // GetMotionEvents requests only Wyze motion alarm types, not sound, smoke,
 // doorbell, or the motion-detection enabled/disabled setting.
 func (c *Client) GetMotionEvents(ctx context.Context, macs []string, beginMS, endMS int64) ([]MotionEvent, error) {
-	raw, err := c.getEventList(ctx, macs, beginMS, endMS, []int{1, 6, 7, 13})
+	return c.GetDetectionEvents(ctx, macs, beginMS, endMS, true, false)
+}
+
+func (c *Client) GetDetectionEvents(ctx context.Context, macs []string, beginMS, endMS int64, motion, sound bool) ([]DetectionEvent, error) {
+	values := make([]int, 0, 5)
+	if motion {
+		values = append(values, 1, 6, 7, 13)
+	}
+	if sound {
+		values = append(values, 2)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("at least one detection type must be enabled")
+	}
+	raw, err := c.getEventList(ctx, macs, beginMS, endMS, values)
 	if err != nil {
 		return nil, err
 	}
-	events := make([]MotionEvent, 0, len(raw))
+	events := make([]DetectionEvent, 0, len(raw))
 	for i, item := range raw {
 		value, err := eventInteger(item["event_value"])
 		if err != nil {
-			return nil, fmt.Errorf("motion event %d: invalid event_value: %w", i, err)
+			return nil, fmt.Errorf("detection event %d: invalid event_value: %w", i, err)
 		}
+		kind := MotionDetection
 		switch value {
 		case 1, 6, 7, 13:
+			if !motion {
+				continue
+			}
+		case 2:
+			if !sound {
+				continue
+			}
+			kind = SoundDetection
 		default:
 			continue
 		}
 		id, err := eventID(item["event_id"])
 		if err != nil {
-			return nil, fmt.Errorf("motion event %d: invalid event_id: %w", i, err)
+			return nil, fmt.Errorf("detection event %d: invalid event_id: %w", i, err)
 		}
 		deviceID, _ := item["device_id"].(string)
 		if deviceID == "" {
@@ -45,9 +78,9 @@ func (c *Client) GetMotionEvents(ctx context.Context, macs []string, beginMS, en
 		}
 		ts, err := eventInteger(item["event_ts"])
 		if deviceID == "" || err != nil || ts <= 0 {
-			return nil, fmt.Errorf("motion event %d: missing device ID or invalid event_ts", i)
+			return nil, fmt.Errorf("detection event %d: missing device ID or invalid event_ts", i)
 		}
-		events = append(events, MotionEvent{ID: id, DeviceID: deviceID, Timestamp: time.UnixMilli(ts)})
+		events = append(events, DetectionEvent{ID: id, DeviceID: deviceID, Timestamp: time.UnixMilli(ts), Kind: kind})
 	}
 	return events, nil
 }

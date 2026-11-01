@@ -9,14 +9,23 @@ import (
 )
 
 func (c *Config) loadMotion() error {
-	if raw, exists := os.LookupEnv("MOTION_API"); exists {
+	for _, flag := range []struct {
+		name string
+		dst  *bool
+	}{
+		{"MOTION_API", &c.MotionAPI}, {"SOUND_API", &c.SoundAPI},
+	} {
+		raw, exists := os.LookupEnv(flag.name)
+		if !exists {
+			continue
+		}
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "true", "1", "yes", "on":
-			c.MotionAPI = true
+			*flag.dst = true
 		case "false", "0", "no", "off":
-			c.MotionAPI = false
+			*flag.dst = false
 		default:
-			return fmt.Errorf("MOTION_API must be true or false")
+			return fmt.Errorf("%s must be true or false", flag.name)
 		}
 	}
 	for _, option := range []struct {
@@ -27,6 +36,7 @@ func (c *Config) loadMotion() error {
 	}{
 		{"MOTION_INT", &c.MotionInterval, 5 * time.Second, time.Minute},
 		{"MOTION_RESET", &c.MotionReset, 10 * time.Second, 5 * time.Minute},
+		{"SOUND_RESET", &c.SoundReset, 10 * time.Second, 5 * time.Minute},
 		{"MOTION_MAX_AGE", &c.MotionMaxAge, 30 * time.Second, 5 * time.Minute},
 	} {
 		*option.dst = option.fallback
@@ -47,7 +57,7 @@ func (c *Config) loadMotion() error {
 		}
 		*option.dst = value
 	}
-	if c.MotionAPI && c.MotionMaxAge < c.MotionInterval {
+	if (c.MotionAPI || c.SoundAPI) && c.MotionMaxAge < c.MotionInterval {
 		return fmt.Errorf("MOTION_MAX_AGE must be at least MOTION_INT")
 	}
 	return nil

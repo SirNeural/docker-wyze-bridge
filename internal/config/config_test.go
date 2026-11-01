@@ -12,17 +12,21 @@ func TestLoadMotionOptions_ValidatesInsteadOfFallingBack(t *testing.T) {
 	}{
 		{"fractional seconds", "MOTION_INT", "1.5", true},
 		{"bad enable", "MOTION_API", "sometimes", false},
+		{"bad sound enable", "SOUND_API", "sometimes", false},
 		{"bad interval", "MOTION_INT", "fast", false},
 		{"zero interval", "MOTION_INT", "0", false},
 		{"subsecond interval", "MOTION_INT", "500ms", false},
 		{"infinite interval", "MOTION_INT", "Inf", false},
 		{"overflow", "MOTION_RESET", "1e100", false},
 		{"bad reset", "MOTION_RESET", "-10s", false},
+		{"bad sound reset", "SOUND_RESET", "0s", false},
 		{"short lookback", "MOTION_MAX_AGE", "1s", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("STATE_DIR", t.TempDir())
 			t.Setenv("MOTION_API", "True")
+			t.Setenv("SOUND_API", "false")
+			t.Setenv("SOUND_RESET", "10s")
 			t.Setenv("MOTION_INT", "5s")
 			t.Setenv("MOTION_RESET", "10s")
 			t.Setenv("MOTION_MAX_AGE", "30s")

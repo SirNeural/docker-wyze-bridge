@@ -231,3 +231,55 @@ func TestConcurrentAuthSnapshotsForMotionSigning(t *testing.T) {
 	})
 	wg.Wait()
 }
+
+func TestGetDetectionEvents_MotionAndSoundFilters(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		motion, sound bool
+		count         int
+	}{
+		{"motion only", true, false, 1},
+		{"sound only", false, true, 1},
+		{"both", true, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			c := motionTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				var request struct {
+					Values []int `json:"event_value_list"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				hasSound := false
+				for _, value := range request.Values {
+					if value == 2 {
+						hasSound = true
+					}
+				}
+				if hasSound != tc.sound {
+					t.Error("incorrect server-side sound filter")
+				}
+				fmt.Fprint(w, `{"code":1,"data":{"event_list":[
+					{"event_id":"motion","device_id":"AA","event_ts":1700000000000,"event_value":1},
+					{"event_id":"sound","device_id":"AA","event_ts":1700000000001,"event_value":"2"},
+					{"event_id":"smoke","device_id":"AA","event_ts":1700000000002,"event_value":4}
+				]}}`)
+			})
+			events, err := c.GetDetectionEvents(context.Background(), []string{"AA"}, 0, 1, tc.motion, tc.sound)
+			if err != nil || len(events) != tc.count || requests != 1 {
+				t.Fatalf("incorrect combined fetch: %v, %+v", err, events)
+			}
+			for _, event := range events {
+				if event.ID == "sound" && event.Kind != SoundDetection {
+					t.Fatal("sound was classified as motion")
+				}
+				if event.ID == "motion" && event.Kind != MotionDetection {
+					t.Fatal("motion was classified as sound")
+				}
+			}
+		})
+	}
+}
