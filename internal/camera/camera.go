@@ -12,7 +12,7 @@ import (
 type State int
 
 const (
-	StateOffline     State = iota
+	StateOffline State = iota
 	StateDiscovering
 	StateConnecting
 	StateStreaming
@@ -54,8 +54,12 @@ type Camera struct {
 	// forceWebRTC overrides the model registry's routing default and
 	// pins this camera to the WebRTC path. Sticky for the process
 	// lifetime; a restart re-probes TUTK from scratch.
-	forceWebRTC bool
-	mu          sync.RWMutex
+	forceWebRTC     bool
+	motionDetected  bool
+	motionTimestamp time.Time
+	soundDetected   bool
+	soundTimestamp  time.Time
+	mu              sync.RWMutex
 }
 
 // NewCamera creates a new Camera from discovered info with default settings.
@@ -239,7 +243,11 @@ type Snapshot struct {
 	// ForceWebRTC reflects the runtime TUTK→WebRTC fallback. Rendered
 	// as `protocol_forced` in /api/metrics so operators can tell the
 	// registry default from the promoted-at-runtime state.
-	ForceWebRTC bool
+	ForceWebRTC     bool
+	MotionDetected  bool
+	MotionTimestamp time.Time
+	SoundDetected   bool
+	SoundTimestamp  time.Time
 }
 
 // Snapshot returns a consistent view of the camera under RLock.
@@ -247,15 +255,19 @@ func (c *Camera) Snapshot() Snapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return Snapshot{
-		Info:        c.Info,
-		State:       c.State,
-		Quality:     c.Quality,
-		AudioOn:     c.AudioOn,
-		Record:      c.Record,
-		ErrorCount:  c.ErrorCount,
-		ConnectedAt: c.ConnectedAt,
-		LastSeen:    c.LastSeen,
-		ForceWebRTC: c.forceWebRTC,
+		Info:            c.Info,
+		State:           c.State,
+		Quality:         c.Quality,
+		AudioOn:         c.AudioOn,
+		Record:          c.Record,
+		ErrorCount:      c.ErrorCount,
+		ConnectedAt:     c.ConnectedAt,
+		LastSeen:        c.LastSeen,
+		ForceWebRTC:     c.forceWebRTC,
+		MotionDetected:  c.motionDetected,
+		MotionTimestamp: c.motionTimestamp,
+		SoundDetected:   c.soundDetected,
+		SoundTimestamp:  c.soundTimestamp,
 	}
 }
 
@@ -263,6 +275,14 @@ func (c *Camera) Snapshot() Snapshot {
 func (c *Camera) StatusJSON() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	var motionTS int64
+	if !c.motionTimestamp.IsZero() {
+		motionTS = c.motionTimestamp.UnixMilli()
+	}
+	var soundTS int64
+	if !c.soundTimestamp.IsZero() {
+		soundTS = c.soundTimestamp.UnixMilli()
+	}
 	return map[string]interface{}{
 		"name":         c.Info.Name,
 		"nickname":     c.Info.Nickname,
@@ -278,5 +298,29 @@ func (c *Camera) StatusJSON() map[string]interface{} {
 		"connected_at": c.ConnectedAt,
 		"last_seen":    c.LastSeen,
 		"error_count":  c.ErrorCount,
+		"motion":       c.motionDetected,
+		"motion_ts":    motionTS,
+		"sound":        c.soundDetected,
+		"sound_ts":     soundTS,
+	}
+}
+
+// SetMotion updates transient motion independently of video connection state.
+// A clear preserves the timestamp of the last real detection.
+func (c *Camera) SetMotion(detected bool, timestamp time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.motionDetected = detected
+	if timestamp.After(c.motionTimestamp) {
+		c.motionTimestamp = timestamp
+	}
+}
+
+func (c *Camera) SetSound(detected bool, timestamp time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.soundDetected = detected
+	if timestamp.After(c.soundTimestamp) {
+		c.soundTimestamp = timestamp
 	}
 }

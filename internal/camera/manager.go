@@ -185,6 +185,7 @@ func (m *Manager) Discover(ctx context.Context) error {
 	for _, info := range filtered {
 		name := info.NormalizedName()
 		seen[name] = true
+		info.DTLS = m.cfg.CamDTLS(name, info.DTLS)
 
 		if existing, ok := m.cameras[name]; ok {
 			// Update info (IP may have changed)

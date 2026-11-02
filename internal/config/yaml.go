@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,6 +44,7 @@ type yamlCamOption struct {
 	CamName string  `yaml:"CAM_NAME"`
 	Quality *string `yaml:"QUALITY"`
 	Audio   *bool   `yaml:"AUDIO"`
+	DTLS    *bool   `yaml:"DTLS"`
 	Record  *bool   `yaml:"RECORD"`
 }
 
@@ -107,6 +110,9 @@ func (c *Config) loadYAML() error {
 		if opt.Audio != nil && ov.Audio == nil {
 			ov.Audio = opt.Audio
 		}
+		if opt.DTLS != nil && ov.DTLS == nil {
+			ov.DTLS = opt.DTLS
+		}
 		if opt.Record != nil && ov.Record == nil {
 			ov.Record = opt.Record
 		}
@@ -116,15 +122,15 @@ func (c *Config) loadYAML() error {
 	return nil
 }
 
-// loadCamOverrides scans environment for QUALITY_{CAM}, AUDIO_{CAM},
+// loadCamOverrides scans environment for QUALITY_{CAM}, AUDIO_{CAM}, DTLS_{CAM},
 // RECORD_{CAM}, and RECORD_CMD_{CAM}. Prefix order matters: RECORD_CMD_
 // is listed before RECORD_ so a longer match wins (otherwise
 // RECORD_CMD_FRONT_DOOR=... would be interpreted as RECORD for camera
 // "CMD_FRONT_DOOR"). Breaks out of the inner loop after the first
 // matched prefix to prevent fallthrough.
-func (c *Config) loadCamOverrides() {
+func (c *Config) loadCamOverrides() error {
 	for _, e := range os.Environ() {
-		for _, prefix := range []string{"QUALITY_", "AUDIO_", "RECORD_CMD_", "RECORD_"} {
+		for _, prefix := range []string{"QUALITY_", "AUDIO_", "DTLS_", "RECORD_CMD_", "RECORD_"} {
 			key, val, ok := cutEnvPrefix(e, prefix)
 			if !ok {
 				continue
@@ -138,6 +144,15 @@ func (c *Config) loadCamOverrides() {
 			case "AUDIO_":
 				b := parseBool(val, true)
 				ov.Audio = &b
+			case "DTLS_":
+				value := strings.ToLower(strings.TrimSpace(val))
+				switch value {
+				case "1", "true", "yes", "on", "0", "false", "no", "off":
+					b := parseBool(value, false)
+					ov.DTLS = &b
+				default:
+					return fmt.Errorf("invalid DTLS_%s: expected a boolean", camKey)
+				}
 			case "RECORD_CMD_":
 				v := val
 				ov.RecordCmd = &v
@@ -149,6 +164,7 @@ func (c *Config) loadCamOverrides() {
 			break
 		}
 	}
+	return nil
 }
 
 func setIfEmpty(dst *string, src string) {

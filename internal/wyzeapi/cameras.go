@@ -280,7 +280,7 @@ func (c *Client) GetCameraStream(cam CameraInfo) (map[string]interface{}, error)
 	headers := c.signPayloadHeaders("9319141212m2ik", sorted)
 	// Wyze's v4 front door also checks lowercase `authorization`; the
 	// HMAC-signed `access_token` header alone isn't enough.
-	headers["authorization"] = c.auth.AccessToken
+	headers["authorization"] = headers["access_token"]
 
 	url := c.NewWyzeURL + "/v4/camera/get_streams"
 	resp, err := c.postRaw(url, headers, sorted)

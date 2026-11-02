@@ -46,6 +46,113 @@ image: idisposablegithub365/wyze-bridge:go
 | **Observability surfaces** | `/metrics` HTML dashboard, `/metrics.prom` Prometheus exposition, `/api/metrics` JSON, expanded `/api/health`, auto-generated `/dashboard.yaml` for Home Assistant. |
 | **MQTT metric topics** | Bridge-wide gauges at `<topic>/bridge/*` (uptime, camera counts, config errors, recordings size) + per-camera `<topic>/<cam>/recording`. All auto-created via HA discovery. See [DOCS/MQTT_SPEC.md](DOCS/MQTT_SPEC.md) for complete details |
 
+## Opt-in Cloud Motion Events and Scrypted
+
+This fork adds low-CPU motion forwarding on top of v4.5.0. Cameras perform
+the detection; the bridge polls the **Wyze cloud event API**, not local TUTK
+alarms. No extra video decoding, Python runtime, motion thumbnails, or
+event-media SD writes are introduced. Streaming remains unchanged.
+
+Add these **environment variables** to the bridge service (motion options
+are not read from `config.yml`):
+
+```yaml
+environment:
+  MOTION_API: "true"
+  MOTION_INT: "5s"
+  MOTION_RESET: "10s"
+  MOTION_MAX_AGE: "30s"
+  SOUND_API: "true"
+  SOUND_RESET: "10s"
+  MQTT_HOST: "YOUR_LOCAL_BROKER"
+  MQTT_PORT: "1883"
+  MQTT_USERNAME: "${MQTT_USERNAME}"
+  MQTT_PASSWORD: "${MQTT_PASSWORD}"
+```
+
+Use an authenticated, private local broker; Scrypted's MQTT plugin also
+includes an embedded Aedes broker. Do not expose MQTT to the internet.
+Existing Docker secret support for MQTT credentials is unchanged.
+`MOTION_API` defaults to false. Intervals also accept bare seconds, such as
+`MOTION_INT=1.5`; invalid options fail startup rather than silently falling
+back. See [the configuration reference](DOCS/DESIGN.md#581-complete-environment-variable-reference)
+for bounds. `MOTION_START` is not implemented: events never force a stream on.
+
+`SOUND_API` is a separate opt-in (default false). It forwards Wyze sound
+events (alarm type 2) to `{MQTT_TOPIC}/{cam}/sound` (`1` detected, `2` clear)
+and `sound_ts` (last event's Unix timestamp in seconds). Motion and sound
+share one cloud request, `MOTION_INT`, and `MOTION_MAX_AGE`; each has its own
+state and clear timer (`MOTION_RESET` vs `SOUND_RESET`). Sound alone can be
+enabled with `MOTION_API=false`. Sound never sets motion or triggers the
+Scrypted motion sensor. Smoke, CO, and other alarm types are not relabeled
+as generic sound.
+
+Enable **sound event recording** in the Wyze app to produce sound events.
+Cloud latency, recording schedules, plan limits, and the shared 20-event
+batch cap also apply to sound. This forwards event metadata, not microphone
+audio or continuously analyzed audio. Existing stream audio is unchanged.
+Sound has separate HA binary-sensor discovery and cloud availability at
+`{MQTT_TOPIC}/bridge/sound_state`; it does not automatically add a sound
+recording trigger to Apple Home.
+
+### Wyze prerequisites and limits
+
+Verify **motion event recording is enabled in the Wyze app**, including the
+recording schedule, and that a new motion event actually appears in its event
+feed. Detection sensitivity or notification settings alone do not prove the
+cloud is producing events. Re-enrolling a camera may change these settings.
+The bridge does not enable recording, purchase a subscription, or alter
+camera settings.
+
+Some cameras/plans have roughly a five-minute cloud event cooldown. Cam Plus
+can provide more frequent events, but behavior depends on model, firmware,
+and plan. Polling faster cannot remove camera/cloud cooldowns. The API is
+unofficial and may change. Delayed events older than `MOTION_MAX_AGE` are
+ignored; increasing that window does not recover video that is no longer
+buffered. The API returns at most 20 events per request, so high-volume bursts
+or long outages can miss detections. This is not instant or fully offline
+motion delivery.
+
+A successful API response with an empty event list confirms access, not
+successful hardware motion delivery or HomeKit recording. Synthetic tests
+cover the event contract and lifecycle; actual detections still need an
+app-and-camera check.
+
+### Scrypted / HomeKit Secure Video
+
+Install Scrypted's MQTT plugin, connect it to the same broker, and create
+a MotionSensor script device subscribing to the camera's topic:
+
+```ts
+mqtt.subscribe({
+  'wyzebridge/front_door_cam/motion': event => {
+    device.motionDetected = event.text === '1';
+  },
+});
+mqtt.handleTypes(ScryptedInterface.MotionSensor);
+```
+
+Use a broker URL without a topic-path prefix for the full topic above.
+Substitute your camera slug and `MQTT_TOPIC` for each camera. Attach the
+imported sensor to the **existing RTSP camera** using Scrypted's Custom
+Motion Sensor extension; do not recreate camera devices. Check the camera
+now exposes `MotionSensor` and follows a real Wyze event from `1` to `2`.
+See [Scrypted's MQTT plugin](https://github.com/koush/scrypted/tree/main/plugins/mqtt).
+
+This supplies the interface required for Scrypted's ordinary HomeKit recording
+capability, but does **not** by itself prove HKSV works. Review compressed-video
+prebuffering and compatible H.264/audio, Apple TV/HomePod hub connectivity,
+iCloud+ recording eligibility, and Apple Home's Stream & Record settings.
+Cloud latency can lose the beginning of a clip. HomeKit may need a capability
+refresh (and, only if necessary, camera re-pairing) after motion is added.
+On a Pi 3 B+, start with one camera and monitor RAM/CPU before enabling
+prebuffering for all cameras. This feature does not configure Scrypted or
+modify the running Pi automatically.
+
+Research references:
+[original bridge cloud-motion documentation](https://github.com/mrlt8/docker-wyze-bridge/wiki/Camera-Motion),
+[Wyze SDK event alarm types](https://github.com/shauntarves/wyze-sdk/blob/master/wyze_sdk/models/events/__init__.py).
+
 ## Breaking Changes
 
 ### Removed: Remote P2P

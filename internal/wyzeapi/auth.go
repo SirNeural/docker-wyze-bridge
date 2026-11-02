@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -36,11 +37,11 @@ const (
 
 // Endpoint-specific sc/sv values for Wyze API.
 var scSV = map[string][2]string{
-	"default":          {"9f275790cab94a72bd206c8876429f3c", "e1fe392906d54888a9b99b88de4162d7"},
-	"run_action":       {"01dd431d098546f9baf5233724fa2ee2", "2c0edc06d4c5465b8c55af207144f0d9"},
-	"get_device_Info":  {"01dd431d098546f9baf5233724fa2ee2", "0bc2c3bedf6c4be688754c9ad42bbf2e"},
-	"get_event_list":   {"9f275790cab94a72bd206c8876429f3c", "782ced6909a44d92a1f70d582bbe88be"},
-	"set_device_Info":  {"01dd431d098546f9baf5233724fa2ee2", "e8e1db44128f4e31a2047a8f5f80b2bd"},
+	"default":         {"9f275790cab94a72bd206c8876429f3c", "e1fe392906d54888a9b99b88de4162d7"},
+	"run_action":      {"01dd431d098546f9baf5233724fa2ee2", "2c0edc06d4c5465b8c55af207144f0d9"},
+	"get_device_Info": {"01dd431d098546f9baf5233724fa2ee2", "0bc2c3bedf6c4be688754c9ad42bbf2e"},
+	"get_event_list":  {"9f275790cab94a72bd206c8876429f3c", "782ced6909a44d92a1f70d582bbe88be"},
+	"set_device_Info": {"01dd431d098546f9baf5233724fa2ee2", "e8e1db44128f4e31a2047a8f5f80b2bd"},
 }
 
 // Known app_id → secret mappings.
@@ -87,6 +88,8 @@ type Client struct {
 	httpClient    *http.Client
 	creds         Credentials
 	auth          *AuthState
+	authMu        sync.RWMutex
+	ensureAuthMu  sync.Mutex
 	bridgeVer     string
 	metrics       *apiMetrics
 	onAuthFailure func(error) // optional; fires when EnsureAuth exhausts retries
@@ -121,12 +124,25 @@ func NewClient(creds Credentials, bridgeVersion string, log zerolog.Logger) *Cli
 
 // Auth returns the current auth state (may be nil).
 func (c *Client) Auth() *AuthState {
-	return c.auth
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	if c.auth == nil {
+		return nil
+	}
+	auth := *c.auth
+	return &auth
 }
 
 // SetAuth sets the auth state (e.g., restored from state file).
 func (c *Client) SetAuth(auth *AuthState) {
-	c.auth = auth
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if auth == nil {
+		c.auth = nil
+		return
+	}
+	copy := *auth
+	c.auth = &copy
 }
 
 // Login authenticates with the Wyze API.
@@ -173,7 +189,7 @@ func (c *Client) Login() (*AuthState, error) {
 	// Token usually valid for ~24h; we'll refresh at ExpiresAt - 5min
 	auth.ExpiresAt = time.Now().Add(23 * time.Hour)
 
-	c.auth = auth
+	c.SetAuth(auth)
 	c.log.Info().Msg("login successful")
 	return auth, nil
 }
@@ -202,8 +218,8 @@ func (c *Client) completeMFA(auth *AuthState, mfaDetails map[string]interface{})
 	}
 
 	headers := map[string]string{
-		"X-API-Key": wyzeAppAPIKey,
-		"phone-id":  auth.PhoneID,
+		"X-API-Key":  wyzeAppAPIKey,
+		"phone-id":   auth.PhoneID,
 		"user-agent": "wyze_ios_" + appVersion,
 	}
 
@@ -223,21 +239,22 @@ func (c *Client) completeMFA(auth *AuthState, mfaDetails map[string]interface{})
 	}
 
 	auth.ExpiresAt = time.Now().Add(23 * time.Hour)
-	c.auth = auth
+	c.SetAuth(auth)
 	c.log.Info().Msg("MFA login successful")
 	return auth, nil
 }
 
 // RefreshToken refreshes the access token.
 func (c *Client) RefreshToken() (*AuthState, error) {
-	if c.auth == nil {
+	auth := c.Auth()
+	if auth == nil {
 		return nil, fmt.Errorf("no auth state to refresh")
 	}
 
 	c.log.Info().Msg("refreshing access token")
 
 	payload := c.authenticatedPayload("default")
-	payload["refresh_token"] = c.auth.RefreshToken
+	payload["refresh_token"] = auth.RefreshToken
 
 	resp, err := c.postJSON(c.WyzeURL+"/user/refresh_token", c.defaultHeaders(), payload)
 	if err != nil {
@@ -245,29 +262,34 @@ func (c *Client) RefreshToken() (*AuthState, error) {
 	}
 
 	if at, ok := resp["access_token"].(string); ok {
-		c.auth.AccessToken = at
+		auth.AccessToken = at
 	}
 	if rt, ok := resp["refresh_token"].(string); ok {
-		c.auth.RefreshToken = rt
+		auth.RefreshToken = rt
 	}
-	c.auth.ExpiresAt = time.Now().Add(23 * time.Hour)
+	auth.ExpiresAt = time.Now().Add(23 * time.Hour)
+	c.SetAuth(auth)
 
 	c.log.Info().Msg("token refreshed")
-	return c.auth, nil
+	return auth, nil
 }
 
 // NeedsRefresh returns true if the token should be refreshed.
 func (c *Client) NeedsRefresh() bool {
-	if c.auth == nil {
+	auth := c.Auth()
+	if auth == nil {
 		return true
 	}
-	return time.Now().After(c.auth.ExpiresAt.Add(-5 * time.Minute))
+	return time.Now().After(auth.ExpiresAt.Add(-5 * time.Minute))
 }
 
 // EnsureAuth ensures we have a valid token, refreshing if needed.
 // Fires the auth observer on failure / recovery.
 func (c *Client) EnsureAuth() error {
-	if c.auth == nil {
+	c.ensureAuthMu.Lock()
+	defer c.ensureAuthMu.Unlock()
+	auth := c.Auth()
+	if auth == nil {
 		c.log.Debug().Msg("no auth state, initiating login")
 		if _, err := c.Login(); err != nil {
 			c.notifyAuthFailure(fmt.Errorf("initial login: %w", err))
@@ -277,11 +299,10 @@ func (c *Client) EnsureAuth() error {
 		return nil
 	}
 	if c.NeedsRefresh() {
-		c.log.Debug().Time("expires_at", c.auth.ExpiresAt).Msg("token nearing expiry, refreshing")
+		c.log.Debug().Time("expires_at", auth.ExpiresAt).Msg("token nearing expiry, refreshing")
 		_, err := c.RefreshToken()
 		if err != nil {
 			c.log.Warn().Err(err).Msg("token refresh failed, re-logging in")
-			c.auth = nil
 			if _, err = c.Login(); err != nil {
 				c.notifyAuthFailure(fmt.Errorf("token refresh + relogin both failed: %w", err))
 				return err
@@ -316,7 +337,7 @@ func (c *Client) GetUserInfo() (*WyzeAccount, error) {
 	}
 
 	account := &WyzeAccount{
-		PhoneID: c.auth.PhoneID,
+		PhoneID: c.Auth().PhoneID,
 	}
 	if v, ok := resp["email"].(string); ok {
 		account.Email = v
@@ -340,8 +361,8 @@ func (c *Client) GetUserInfo() (*WyzeAccount, error) {
 // loginHeaders returns headers for the login endpoint specifically.
 func (c *Client) loginHeaders() map[string]string {
 	var phoneID string
-	if c.auth != nil {
-		phoneID = c.auth.PhoneID
+	if auth := c.Auth(); auth != nil {
+		phoneID = auth.PhoneID
 	}
 	if phoneID == "" {
 		phoneID = generatePhoneID()
@@ -365,6 +386,7 @@ func (c *Client) defaultHeaders() map[string]string {
 
 // authenticatedPayload returns the standard payload fields for authenticated endpoints.
 func (c *Client) authenticatedPayload(endpoint string) map[string]interface{} {
+	auth := c.Auth()
 	sv := scSV["default"]
 	if v, ok := scSV[endpoint]; ok {
 		sv = v
@@ -377,23 +399,24 @@ func (c *Client) authenticatedPayload(endpoint string) map[string]interface{} {
 		"app_name":          "com.hualai.WyzeCam",
 		"phone_system_type": 1,
 		"ts":                time.Now().UnixMilli(),
-		"access_token":      c.auth.AccessToken,
-		"phone_id":          c.auth.PhoneID,
+		"access_token":      auth.AccessToken,
+		"phone_id":          auth.PhoneID,
 	}
 }
 
 // signPayloadHeaders returns headers with HMAC signature for v4 API calls.
 func (c *Client) signPayloadHeaders(appID string, payload string) map[string]string {
+	auth := c.Auth()
 	return map[string]string{
 		"content-type": "application/json",
-		"phoneid":      c.auth.PhoneID,
+		"phoneid":      auth.PhoneID,
 		"user-agent":   "wyze_ios_" + appVersion,
 		"appinfo":      "wyze_ios_" + appVersion,
 		"appversion":   appVersion,
-		"access_token": c.auth.AccessToken,
+		"access_token": auth.AccessToken,
 		"appid":        appID,
 		"env":          "prod",
-		"signature2":   signMsg(appID, payload, c.auth.AccessToken),
+		"signature2":   signMsg(appID, payload, auth.AccessToken),
 	}
 }
 
