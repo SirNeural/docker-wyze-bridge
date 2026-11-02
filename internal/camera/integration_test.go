@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -67,10 +68,10 @@ func mockWyzeAPIServer(t *testing.T) *httptest.Server {
 						"enr":           "enr1",
 						"firmware_ver":  "4.52.9",
 						"device_params": map[string]interface{}{
-							"p2p_id":   "UID01234567890123456",
-							"p2p_type": float64(4),
-							"ip":       "10.0.0.1",
-							"dtls":     float64(1),
+							"p2p_id":            "UID01234567890123456",
+							"p2p_type":          float64(4),
+							"ip":                "10.0.0.1",
+							"dtls":              float64(1),
 							"camera_thumbnails": map[string]interface{}{},
 						},
 					},
@@ -82,10 +83,10 @@ func mockWyzeAPIServer(t *testing.T) *httptest.Server {
 						"enr":           "enr2",
 						"firmware_ver":  "4.36.14",
 						"device_params": map[string]interface{}{
-							"p2p_id":   "UID01234567890123457",
-							"p2p_type": float64(4),
-							"ip":       "10.0.0.2",
-							"dtls":     float64(1),
+							"p2p_id":            "UID01234567890123457",
+							"p2p_type":          float64(4),
+							"ip":                "10.0.0.2",
+							"dtls":              float64(1),
 							"camera_thumbnails": map[string]interface{}{},
 						},
 					},
@@ -112,6 +113,56 @@ func newTestManager(t *testing.T) (*Manager, *go2rtcmgr.APIClient) {
 	wapi := wyzeapi.NewClient(wyzeapi.Credentials{}, "test", zerolog.Nop())
 	mgr := NewManager(cfg, wapi, go2rtcAPI, zerolog.Nop())
 	return mgr, go2rtcAPI
+}
+
+func TestManager_DiscoverDTLSOverride(t *testing.T) {
+	enabled, disabled := true, false
+	for _, test := range []struct {
+		name     string
+		reported int
+		override *bool
+		want     string
+	}{
+		{"force enabled", 0, &enabled, "true"},
+		{"force disabled", 1, &disabled, "false"},
+		{"cloud default", 1, nil, "true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"code": "1",
+					"data": map[string]any{"device_list": []any{map[string]any{
+						"product_type": "Camera", "product_model": "WYZEC1-JZ",
+						"mac": "AABB01", "nickname": "Living Room", "enr": "test-enr",
+						"device_params": map[string]any{
+							"p2p_id": "UID01234567890123456", "ip": "10.0.0.1",
+							"dtls": test.reported,
+						},
+					}}},
+				})
+			}))
+			defer server.Close()
+			manager, _ := newTestManager(t)
+			manager.api.WyzeURL = server.URL
+			manager.api.SetAuth(&wyzeapi.AuthState{
+				AccessToken: "test-token", PhoneID: "test-phone",
+				ExpiresAt: time.Now().Add(time.Hour),
+			})
+			manager.cfg.CamOverrides["LIVING_ROOM"] = config.CamOverride{DTLS: test.override}
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := manager.Discover(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				source, err := url.Parse(manager.GetCamera("living_room").StreamURL())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := source.Query().Get("dtls"); got != test.want {
+					t.Fatalf("Discovery %d: DTLS = %s, want %s", attempt, got, test.want)
+				}
+			}
+		})
+	}
 }
 
 func TestManager_ConnectAll_Empty(t *testing.T) {

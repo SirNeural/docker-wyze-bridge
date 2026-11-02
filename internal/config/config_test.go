@@ -115,6 +115,8 @@ func TestCamOverrides(t *testing.T) {
 	t.Setenv("QUALITY_FRONT_DOOR", "sd")
 	t.Setenv("AUDIO_BACKYARD", "false")
 	t.Setenv("RECORD_GARAGE", "true")
+	t.Setenv("DTLS_LIVING_ROOM", "true")
+	t.Setenv("DTLS_BACKYARD", "false")
 
 	cfg, err := Load()
 	if err != nil {
@@ -132,6 +134,19 @@ func TestCamOverrides(t *testing.T) {
 	}
 	if r := cfg.CamRecord("garage"); !r {
 		t.Error("CamRecord(garage) should be true")
+	}
+	if !cfg.CamDTLS("living room", false) || cfg.CamDTLS("backyard", true) {
+		t.Error("DTLS overrides should replace cloud metadata in either direction")
+	}
+	if cfg.CamDTLS("unknown_cam", false) || !cfg.CamDTLS("unknown_cam", true) {
+		t.Error("Unconfigured cameras should retain their cloud-reported DTLS setting")
+	}
+}
+
+func TestCamOverridesInvalidDTLS(t *testing.T) {
+	t.Setenv("DTLS_LIVING_ROOM", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("Invalid DTLS override should fail configuration loading")
 	}
 }
 

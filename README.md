@@ -301,7 +301,12 @@ Uppercase the normalized camera name, then prefix:
 QUALITY_FRONT_DOOR=sd      # hd (default) or sd
 AUDIO_BACKYARD=false       # audio off for this camera
 RECORD_GARAGE=true         # recording on for just this camera
+DTLS_LIVING_ROOM=true      # override incorrect cloud metadata for a verified DTLS camera
 ```
+
+DTLS overrides default to the cloud-reported capability and survive rediscovery.
+Only override a camera after verifying its firmware supports DTLS. The same
+setting is available as `DTLS` in a YAML `CAM_OPTIONS` entry.
 
 ### Camera Filtering
 

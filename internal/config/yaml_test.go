@@ -22,6 +22,7 @@ CAM_OPTIONS:
   - CAM_NAME: garage
     QUALITY: sd
     AUDIO: false
+    DTLS: true
     RECORD: true
 `
 	os.WriteFile(filepath.Join(dir, "config.yml"), []byte(yaml), 0644)
@@ -72,6 +73,9 @@ CAM_OPTIONS:
 	}
 	if ov.Audio == nil || *ov.Audio != false {
 		t.Errorf("GARAGE audio = %v", ov.Audio)
+	}
+	if ov.DTLS == nil || !*ov.DTLS {
+		t.Errorf("GARAGE DTLS = %v", ov.DTLS)
 	}
 	if ov.Record == nil || *ov.Record != true {
 		t.Errorf("GARAGE record = %v", ov.Record)

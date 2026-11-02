@@ -133,6 +133,7 @@ type Config struct {
 type CamOverride struct {
 	Quality   *string
 	Audio     *bool
+	DTLS      *bool
 	Record    *bool
 	RecordCmd *string // per-camera RECORD_CMD_<CAM> — overrides global
 }
@@ -268,7 +269,9 @@ func Load() (*Config, error) {
 	}
 
 	// Load per-camera overrides from env
-	cfg.loadCamOverrides()
+	if err := cfg.loadCamOverrides(); err != nil {
+		return nil, err
+	}
 
 	if err := cfg.loadMotion(); err != nil {
 		return nil, err
@@ -292,6 +295,15 @@ func (c *Config) CamAudio(camName string) bool {
 		return *ov.Audio
 	}
 	return c.Audio
+}
+
+// CamDTLS returns an override or the cloud-reported transport capability.
+func (c *Config) CamDTLS(camName string, reported bool) bool {
+	key := normalizeCamName(camName)
+	if ov, ok := c.CamOverrides[key]; ok && ov.DTLS != nil {
+		return *ov.DTLS
+	}
+	return reported
 }
 
 // CamRecord returns the effective record setting for a camera.
